@@ -3,7 +3,12 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Release](https://img.shields.io/github/v/release/xiaoxinmm/FuckYourACE.svg?style=flat-square)](https://github.com/xiaoxinmm/FuckYourACE/releases)
 
+<center> 
+
+# ![logo](icon.png)
 **一个专治进程 CPU 占用过高的小工具。（请管理员运行！）**
+
+</center> 
 
 ## 🖥️ 界面预览
 ![FuckYourACE 运行截图](FYourACE_screenshot.png)
@@ -68,7 +73,7 @@
     ```
 
 4.  **运行**
-    构建好的可执行文件位于 `build/bin/FuckYourACE.exe`。
+    构建好地可执行文件位于 `build/bin/FuckYourACE.exe`。
 
 
 ## ⚠️ 免责声明 (Disclaimer)
