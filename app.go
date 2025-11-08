@@ -69,7 +69,8 @@ func (a *App) runLoop() {
 		a.logSystemInfo()
 
 		a.Logf("欢迎使用 Fuck your ACE！")
-		a.Logf("本程序已自动获取管理员权限。")
+		a.Logf("请以管理员方式运行本程序。")
+		a.Logf("绑定失败时，请以管理员方式重新启动程序。")
 
 		// 开始无限循环
 		for {
