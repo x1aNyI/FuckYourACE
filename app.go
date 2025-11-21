@@ -1,13 +1,9 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"log"
-	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -23,20 +19,6 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// 云端后台 API 地址
-const (
-	// !! 警告：请将这里替换为你的真实后台服务器 API 地址
-	backendURL = "https://your-api-server.com/api"
-)
-
-// CloudConfig 定义了从云端获取的配置结构
-type CloudConfig struct {
-	ProcessList     []string `json:"process_list"`
-	Announcement    string   `json:"announcement"`
-	TotalExecutions uint64   `json:"total_executions"`
-	OnlineUsers     int      `json:"online_users"`
-}
-
 // App 结构体
 type App struct {
 	ctx            context.Context
@@ -45,11 +27,7 @@ type App struct {
 	logPath        string
 	executionCount uint64 // 本地执行计数器
 
-	// 云端控制相关
-	clientID        string       // 客户端唯一ID
-	targetProcesses []string     // 从云端获取的目标进程列表
-	cloudConfig     CloudConfig  // 存储云端配置
-	httpClient      *http.Client // HTTP 客户端
+	targetProcesses []string // 从云端获取的目标进程列表
 }
 
 // NewApp 创建一个新的 App 应用结构体
@@ -57,9 +35,6 @@ func NewApp() *App {
 	return &App{
 		// 默认的进程列表，作为获取失败时的后备
 		targetProcesses: []string{"SGuard64.exe", "SGuardSvc64.exe"},
-		httpClient: &http.Client{
-			Timeout: 10 * time.Second, // 10秒超时
-		},
 	}
 }
 
@@ -73,10 +48,6 @@ func (a *App) startup(ctx context.Context) {
 		a.Logf("!!! 警告：本地日志文件创建失败: %v", err)
 	}
 
-	// 异步初始化
-	go a.initClientID()
-	go a.fetchCloudConfig() // 尝试获取云端配置
-
 	// 启动主程序循环
 	go a.runLoop()
 }
@@ -88,141 +59,6 @@ func (a *App) shutdown(ctx context.Context) {
 		a.fileLogger.Println("Logger shutting down.")
 		a.logFile.Close()
 	}
-}
-
-// initClientID 初始化客户端唯一ID
-func (a *App) initClientID() {
-	// 尝试获取唯一的机器 ID
-	info, err := host.InfoWithContext(a.ctx)
-	if err != nil {
-		a.Logf("!!! 警告：获取客户端ID失败: %v", err)
-		a.clientID = "unknown-client"
-		return
-	}
-	a.clientID = info.HostID
-	if a.clientID == "" {
-		a.clientID = "unknown-host-id"
-	}
-	a.fileLogger.Printf("Client ID set to: %s", a.clientID)
-}
-
-// fetchCloudConfig 从云端获取配置
-func (a *App) fetchCloudConfig() {
-	a.Logf("... 正在连接云端获取配置 ...")
-	req, err := http.NewRequestWithContext(a.ctx, "GET", backendURL+"/config", nil)
-	if err != nil {
-		a.Logf("!!! 警告：创建云端请求失败: %v", err)
-		return
-	}
-
-	resp, err := a.httpClient.Do(req)
-	if err != nil {
-		a.Logf("!!! 警告：连接云端失败: %v", err)
-		a.Logf("... 将使用默认配置运行 ...")
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		a.Logf("!!! 警告：云端服务器返回状态: %s", resp.Status)
-		return
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		a.Logf("!!! 警告：读取云端响应失败: %v", err)
-		return
-	}
-
-	var config CloudConfig
-	if err := json.Unmarshal(body, &config); err != nil {
-		a.Logf("!!! 警告：解析云端配置失败: %v", err)
-		return
-	}
-
-	a.cloudConfig = config // 存储公告
-	if len(config.ProcessList) > 0 {
-		a.targetProcesses = config.ProcessList // 替换进程列表
-		a.Logf("✅ 云端配置同步成功！")
-		a.Logf("... 目标进程列表已更新: %v", a.targetProcesses)
-	} else {
-		a.Logf("... 云端未提供进程列表，使用默认配置 ...")
-	}
-	//启动时统计一次使用
-	wailsRuntime.EventsEmit(a.ctx, "stats-update", config.OnlineUsers, config.TotalExecutions)
-}
-
-// sendHeartbeat 发送心跳到后台
-func (a *App) sendHeartbeat() {
-	if a.clientID == "" {
-		return // 还未获取到ID
-	}
-
-	data := map[string]string{"client_id": a.clientID}
-	jsonData, err := json.Marshal(data)
-	if err != nil {
-		a.fileLogger.Printf("Heartbeat marshal error: %v", err) // 心跳失败只记录到文件
-		return
-	}
-
-	req, err := http.NewRequestWithContext(a.ctx, "POST", backendURL+"/heartbeat", bytes.NewBuffer(jsonData))
-	if err != nil {
-		a.fileLogger.Printf("Heartbeat request create error: %v", err)
-		return
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := a.httpClient.Do(req)
-	if err != nil {
-		a.fileLogger.Printf("Heartbeat send error: %v", err)
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusOK {
-		a.fileLogger.Println("Heartbeat sent successfully.")
-	} else {
-		a.fileLogger.Printf("Heartbeat server response: %s", resp.Status)
-	}
-}
-
-// fetchServerStats 循环获取最新的统计数据
-func (a *App) fetchServerStats() {
-	if a.ctx.Err() != nil {
-		return // 检查上下文是否已取消
-	}
-	req, err := http.NewRequestWithContext(a.ctx, "GET", backendURL+"/config", nil)
-	if err != nil {
-		a.fileLogger.Printf("Stats fetch request error: %v", err)
-		return
-	}
-
-	resp, err := a.httpClient.Do(req)
-	if err != nil {
-		a.fileLogger.Printf("Stats fetch send error: %v", err)
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		a.fileLogger.Printf("Stats fetch server error: %s", resp.Status)
-		return
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		a.fileLogger.Printf("Stats fetch read body error: %v", err)
-		return
-	}
-
-	var stats CloudConfig
-	if err := json.Unmarshal(body, &stats); err != nil {
-		a.fileLogger.Printf("解析云端统计失败: %v", err)
-		return
-	}
-
-	// 向前端发送最新统计数据
-	wailsRuntime.EventsEmit(a.ctx, "stats-update", stats.OnlineUsers, stats.TotalExecutions)
 }
 
 // runLoop 是程序的主循环
@@ -241,34 +77,9 @@ func (a *App) runLoop() {
 		a.Logf("请以管理员方式运行本程序。")
 		a.Logf("绑定失败时，请以管理员方式重新启动程序。")
 
-		// 显示云端公告
-		time.Sleep(2 * time.Second)
-		if a.cloudConfig.Announcement != "" {
-			a.Logf("--- 云端公告 ---")
-			a.Logf(a.cloudConfig.Announcement)
-			a.Logf("----------------")
-		}
-
-		// 启动一个独立的goroutine来定期刷新统计数据
-		go func() {
-			statsTicker := time.NewTicker(15 * time.Second)
-			defer statsTicker.Stop()
-
-			for {
-				select {
-				case <-a.ctx.Done(): // 程序退出
-					return
-				case <-statsTicker.C:
-					a.fetchServerStats() // 定期获取统计
-				}
-			}
-		}()
-
 		// 开始无限循环
 		for {
 			a.RunBindingProcess()
-			// 每次循环发送心跳（这将自动增加服务器的总执行次数）
-			go a.sendHeartbeat()
 			a.runCountdown() // 执行60秒倒计时
 		}
 	})
